@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Google Cycle Route Lab</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="route-panel" aria-label="Google cycling route controls">
+        <header class="brand-row">
+          <div>
+            <p class="eyebrow">Google Cycle Route Lab</p>
+            <h1>Bike route experiment</h1>
+          </div>
+          <span class="source-badge">Google v2</span>
+        </header>
+
+        <form class="route-form" id="routeForm">
+          <section class="control-section">
+            <label for="googleKeyInput">Google Maps key</label>
+            <div class="input-row">
+              <input
+                id="googleKeyInput"
+                name="googleKey"
+                type="password"
+                autocomplete="off"
+                placeholder="Paste key"
+              />
+              <button type="button" id="loadMapButton">Load</button>
+            </div>
+          </section>
+
+          <section class="control-section">
+            <label for="originInput">Start</label>
+            <div class="input-row">
+              <input
+                id="originInput"
+                name="origin"
+                type="search"
+                autocomplete="street-address"
+                placeholder="Address or place"
+              />
+              <button type="button" id="searchButton">Find</button>
+            </div>
+            <button type="button" id="locationButton">Use Location</button>
+          </section>
+
+          <section class="control-section">
+            <label>Distance</label>
+            <div class="segment-control" role="radiogroup" aria-label="Distance">
+              <input id="distance5" name="distancePreset" type="radio" value="5" />
+              <label for="distance5">5 mi</label>
+              <input
+                id="distance10"
+                name="distancePreset"
+                type="radio"
+                value="10"
+                checked
+              />
+              <label for="distance10">10 mi</label>
+              <input id="distance20" name="distancePreset" type="radio" value="20" />
+              <label for="distance20">20 mi</label>
+            </div>
+            <div class="input-row compact">
+              <input
+                id="customDistance"
+                name="customDistance"
+                type="number"
+                min="2"
+                max="80"
+                step="1"
+                value="10"
+              />
+              <span class="unit-label">custom miles</span>
+            </div>
+          </section>
+
+          <section class="control-section split-section">
+            <div>
+              <label for="routeModeSelect">Mode</label>
+              <select id="routeModeSelect" name="routeMode">
+                <option value="manual" selected>Manual anchors</option>
+                <option value="auto">Auto prototype</option>
+              </select>
+            </div>
+            <div>
+              <label for="candidateSelect">Candidates</label>
+              <select id="candidateSelect" name="candidates">
+                <option value="3">3</option>
+                <option value="5">5</option>
+                <option value="8" selected>8</option>
+                <option value="10">10</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="control-section split-section">
+            <div>
+              <label for="loopShapeSelect">Shape</label>
+              <select id="loopShapeSelect" name="loopShape">
+                <option value="triangle">Triangle</option>
+                <option value="box" selected>Box</option>
+              </select>
+            </div>
+            <div>
+              <label>Anchors</label>
+              <button type="button" id="clearAnchorsButton">Clear Anchors</button>
+            </div>
+          </section>
+
+          <section class="control-section">
+            <div class="checkbox-row">
+              <input id="avoidHighwaysInput" name="avoidHighways" type="checkbox" checked />
+              <label for="avoidHighwaysInput">Avoid highways</label>
+            </div>
+            <div class="checkbox-row">
+              <input id="rejectSpursInput" name="rejectSpurs" type="checkbox" checked />
+              <label for="rejectSpursInput">Reject spur routes</label>
+            </div>
+          </section>
+
+          <button class="primary-action" id="buildButton" type="submit">
+            Build Google Route
+          </button>
+        </form>
+
+        <section class="route-readout" aria-live="polite">
+          <div class="metric">
+            <span>Mode</span>
+            <strong>Bicycle</strong>
+          </div>
+          <div class="metric">
+            <span>Distance</span>
+            <strong id="distanceOut">--</strong>
+          </div>
+          <div class="metric">
+            <span>Est. Time</span>
+            <strong id="timeOut">--</strong>
+          </div>
+          <div class="metric">
+            <span>Spurs</span>
+            <strong id="spursOut">--</strong>
+          </div>
+          <div class="metric">
+            <span>Anchors</span>
+            <strong id="anchorsOut">0</strong>
+          </div>
+        </section>
+
+        <p class="status-line" id="statusText">Ready.</p>
+      </aside>
+
+      <main class="map-shell" aria-label="Google route map">
+        <div id="map"></div>
+      </main>
+    </div>
+
+    <script src="app.js?v=20260521-google-perimeter-anchors"></script>
+  </body>
+</html>

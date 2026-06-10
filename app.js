@@ -311,6 +311,16 @@ async function buildRoute() {
 
   state.routeSeed += 1;
   const orsKey = elements.orsKeyInput.value.trim();
+
+  if (orsKey && isLikelyGoogleMapsKey(orsKey)) {
+    clearRouteDisplay();
+    setStatus(
+      "That looks like a Google Maps key. Paste an openrouteservice API key for live routing.",
+      "error",
+    );
+    return;
+  }
+
   const buildMessage =
     orsKey &&
     (elements.avoidBacktracksInput.checked ||
@@ -331,10 +341,18 @@ async function buildRoute() {
     drawRoute(route, { resetHistory: true });
     setStatus(createDisplayStatus(route), "success");
   } catch (error) {
+    if (orsKey) {
+      clearRouteDisplay();
+      setStatus(
+        `${error.message} Live routing failed, so no preview route was shown.`,
+        "error",
+      );
+      return;
+    }
+
     const fallbackRoute = applyStartDirectionPreference(
       buildPreviewLoop(state.start, targetMiles),
     );
-
     fallbackRoute.driveToStart = await getDriveToStartEstimate(orsKey);
     drawRoute(fallbackRoute, { resetHistory: true });
     setStatus(
@@ -350,6 +368,12 @@ async function geocodeAddress(query) {
   const orsKey = elements.orsKeyInput.value.trim();
 
   if (orsKey) {
+    if (isLikelyGoogleMapsKey(orsKey)) {
+      throw new Error(
+        "That looks like a Google Maps key. Paste an openrouteservice API key.",
+      );
+    }
+
     const params = new URLSearchParams({
       api_key: orsKey,
       text: query,
@@ -439,7 +463,12 @@ async function buildOpenRouteServiceLoop(start, targetMiles, apiKey) {
   for (let index = 0; index < candidateCount; index += 1) {
     try {
       const seed = state.routeSeed + index * 101;
-      const route = await fetchOpenRouteServiceLoop(start, targetMiles, apiKey, seed);
+      const route = await fetchOpenRouteServiceLoop(
+        start,
+        targetMiles,
+        apiKey,
+        seed,
+      );
 
       route.quality = scoreRouteQuality(route, preferences);
       candidates.push(route);
@@ -715,8 +744,35 @@ function buildPreviewLoop(start, targetMiles) {
     distanceMeters,
     durationSeconds: estimateRideSeconds(distanceMeters),
     source: "preview",
-    status: "Preview loop built. Add a routing key for real bike roads.",
+    status: "Preview only, not real streets. Add an ORS key for live bike routing.",
   };
+}
+
+function clearRouteDisplay() {
+  state.route = null;
+
+  if (state.routeLayer) {
+    state.routeLayer.remove();
+    state.routeLayer = null;
+  }
+
+  if (state.spurLayer) {
+    state.spurLayer.remove();
+    state.spurLayer = null;
+  }
+
+  state.routeHistory = [];
+  elements.distanceOut.textContent = "--";
+  elements.timeOut.textContent = "--";
+  elements.driveOut.textContent = "--";
+  elements.driveOut.title = "";
+  elements.pointsOut.textContent = "--";
+  elements.sourceBadge.textContent = "No route";
+  elements.downloadButton.disabled = true;
+  elements.downloadEnhancedButton.disabled = true;
+  elements.downloadTcxButton.disabled = true;
+  elements.shareButton.disabled = true;
+  updateUndoButton();
 }
 
 function applyStartDirectionPreference(route) {
@@ -2068,6 +2124,10 @@ function createSafeFileName(name) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+}
+
+function isLikelyGoogleMapsKey(value) {
+  return String(value).trim().startsWith("AIza");
 }
 
 function setBusy(isBusy, message) {

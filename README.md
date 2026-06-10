@@ -15,6 +15,7 @@ This repo has one primary tool and one paused experiment:
 - Pick a target distance such as 5, 10, or 20 miles.
 - Generate routes with the road-bike profile.
 - Add an openrouteservice API key for live bicycle routing.
+- The live routing key must be an openrouteservice key, not a Google Maps key.
 - Export the generated route as a `.gpx` or `.tcx` file.
 - Save your home address to show estimated ORS drive time from home to the selected ride start when an ORS key is available.
 - Keep **Avoid out-and-backs** on to score several route candidates and choose the one with less backtracking and fewer spur-like sections.
@@ -40,6 +41,10 @@ Then open:
 ```text
 http://localhost:5173
 ```
+
+## Deploy
+
+See [DEPLOY.md](DEPLOY.md) for DigitalOcean Droplet deployment steps.
 
 ## Garmin
 

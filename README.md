@@ -17,6 +17,8 @@ This repo has one primary tool and one paused experiment:
 - Add an openrouteservice API key for live bicycle routing.
 - The live routing key must be an openrouteservice key, not a Google Maps key.
 - Export the generated route as a `.gpx` or `.tcx` file.
+- Send the generated Garmin GPX directly to Garmin Connect as a private course
+  when the local Garmin backend is running.
 - Save your home address to show estimated ORS drive time from home to the selected ride start when an ORS key is available.
 - Keep **Avoid out-and-backs** on to score several route candidates and choose the one with less backtracking and fewer spur-like sections.
 - Keep **Family-safe roads** on to penalize state roads, highways, and low-suitability segments. Add names like `NJ-34` to **Avoid Roads** for an extra penalty.
@@ -42,6 +44,74 @@ Then open:
 http://localhost:5173
 ```
 
+Private Garmin upload backend:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export GARMIN_EMAIL="you@example.com"
+export GARMIN_PASSWORD="your-garmin-password"
+export GARMIN_TOKENSTORE=".private/garmin_tokens"
+python tools/garmin_login.py
+uvicorn server:app --reload --port 5173
+```
+
+Then open:
+
+```text
+http://localhost:5173
+```
+
+Use **Send to Garmin** after building a route. The backend uploads the same
+conservative Garmin GPX file to Garmin Connect's private Courses flow and saves
+the returned course. Garmin credentials and cached tokens stay on the server and
+are ignored by git.
+
+### DigitalOcean App Platform
+
+For App Platform, deploy RideLoop as a **Web Service**, not a Static Site. A
+Static Site can serve the map UI, but it cannot run the private Garmin API
+endpoint.
+
+The included `Procfile` starts the service with:
+
+```bash
+uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}
+```
+
+DigitalOcean lets you add env vars after the app is created: open the app, go to
+**Settings**, click the web service component, find **Environment Variables**,
+click **Edit**, then **Add environment variable**. Use runtime scope and encrypt
+secret values.
+
+Simplest App Platform variables:
+
+```text
+GARMIN_EMAIL=you@example.com
+GARMIN_PASSWORD=your-garmin-password
+GARMIN_TOKENSTORE=/tmp/rideloop-garmin-tokens
+```
+
+Safer token-based App Platform variables:
+
+```bash
+source .venv/bin/activate
+python tools/garmin_login.py
+python tools/garmin_token_env.py
+```
+
+Paste the printed values into App Platform as encrypted runtime variables:
+
+```text
+GARMIN_TOKENSTORE=/tmp/rideloop-garmin-tokens
+GARMIN_OAUTH1_JSON_B64=...
+GARMIN_OAUTH2_JSON_B64=...
+```
+
+With token variables, you usually do not need to store `GARMIN_PASSWORD` in
+DigitalOcean.
+
 ## Deploy
 
 See [DEPLOY.md](DEPLOY.md) for DigitalOcean Droplet deployment steps.
@@ -56,6 +126,10 @@ Garmin Connect has two upload flows:
 For an Edge 1040 route, use **Courses > Import**. If Garmin Connect rejects the upload, connect the Edge 1040 over USB and copy the `.gpx` or `.tcx` file into `Garmin/NewFiles`, then eject the device so it can process the file into a course.
 
 The **Garmin GPX** export is intentionally conservative because Garmin Connect's course importer is picky. **Enhanced GPX** adds waypoints and route points for apps that handle richer GPX files.
+
+The **Send to Garmin** button uses an unofficial personal integration discovered
+from Garmin Connect's own web course-import flow. It is not Garmin's commercial
+Courses API, so it may need maintenance if Garmin changes private endpoints.
 
 ## Paused Google Route Tool
 

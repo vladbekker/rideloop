@@ -36,6 +36,7 @@ const elements = {
   downloadEnhancedButton: document.querySelector("#downloadEnhancedButton"),
   downloadTcxButton: document.querySelector("#downloadTcxButton"),
   shareButton: document.querySelector("#shareButton"),
+  sendGarminButton: document.querySelector("#sendGarminButton"),
   undoEditButton: document.querySelector("#undoEditButton"),
   sourceBadge: document.querySelector("#sourceBadge"),
   statusText: document.querySelector("#statusText"),
@@ -234,6 +235,11 @@ elements.downloadTcxButton.addEventListener("click", () => {
 elements.shareButton.addEventListener("click", async () => {
   if (!state.route) return;
   await shareGpx(state.route);
+});
+
+elements.sendGarminButton.addEventListener("click", async () => {
+  if (!state.route) return;
+  await sendRouteToGarmin(state.route);
 });
 
 elements.undoEditButton.addEventListener("click", () => {
@@ -772,6 +778,7 @@ function clearRouteDisplay() {
   elements.downloadEnhancedButton.disabled = true;
   elements.downloadTcxButton.disabled = true;
   elements.shareButton.disabled = true;
+  elements.sendGarminButton.disabled = true;
   updateUndoButton();
 }
 
@@ -949,6 +956,7 @@ function drawRoute(route, options = {}) {
   elements.downloadEnhancedButton.disabled = false;
   elements.downloadTcxButton.disabled = false;
   elements.shareButton.disabled = false;
+  elements.sendGarminButton.disabled = false;
   updateUndoButton();
   drawSpurCleanup(route);
 }
@@ -2071,6 +2079,65 @@ async function shareGpx(route) {
   setStatus("Sharing is not available here, so the GPX was downloaded.", "success");
 }
 
+async function sendRouteToGarmin(route) {
+  const file = createGpxFile(route);
+  const formData = new FormData();
+
+  formData.append("file", file, file.name);
+  formData.append("course_name", route.name);
+  elements.sendGarminButton.disabled = true;
+  setStatus("Sending course to Garmin Connect...");
+
+  try {
+    const response = await fetch("/api/garmin/course", {
+      method: "POST",
+      body: formData,
+    });
+    const data = await readJsonResponse(response);
+
+    if (!response.ok) {
+      throw new Error(
+        createUploadErrorMessage(data.detail || data.message || "Garmin upload failed."),
+      );
+    }
+
+    const courseId = data.courseId ? ` #${data.courseId}` : "";
+    setStatus(
+      `Sent to Garmin Connect as ${data.courseName || route.name}${courseId}.`,
+      "success",
+    );
+  } catch (error) {
+    setStatus(
+      `${error.message} Start the private Garmin backend if it is not running.`,
+      "error",
+    );
+  } finally {
+    elements.sendGarminButton.disabled = !state.route;
+  }
+}
+
+function createUploadErrorMessage(message) {
+  if (!message || String(message).length > 180 || String(message).includes("<html")) {
+    return "Garmin backend is not available.";
+  }
+
+  return String(message);
+}
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { message: text };
+  }
+}
+
 function createGpxFile(route) {
   const safeName = createSafeFileName(route.name);
 
@@ -2139,6 +2206,7 @@ function setBusy(isBusy, message) {
   elements.useHomeButton.disabled = isBusy;
   elements.saveKeyButton.disabled = isBusy;
   elements.firstTurnRightInput.disabled = isBusy;
+  elements.sendGarminButton.disabled = isBusy || !state.route;
   updateUndoButton();
   updateClosureControls();
   updateWaypointControls();

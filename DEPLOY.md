@@ -105,3 +105,4 @@ git pull
 - For a public product, a backend proxy is safer so users do not need their own ORS key.
 - The private Garmin course upload requires the Python backend in `server.py`; a static-only deploy will still show the app, but **Send to Garmin** will not work. Store `GARMIN_EMAIL`, `GARMIN_PASSWORD`, and `GARMIN_TOKENSTORE` as server-side environment variables only.
 - For DigitalOcean App Platform, use a **Web Service** component and set encrypted runtime variables under app **Settings** > your service component > **Environment Variables**. The `Procfile` starts `uvicorn` on the App Platform `$PORT`.
+- The repo includes `runtime.txt` to keep App Platform from guessing the Python runtime. If App Platform still treats the component as a Static Site, create a new Web Service component from this repo.

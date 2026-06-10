@@ -77,8 +77,13 @@ endpoint.
 The included `Procfile` starts the service with:
 
 ```bash
-uvicorn server:app --host 0.0.0.0 --port ${PORT:-8080}
+uvicorn server:app --host 0.0.0.0 --port $PORT
 ```
+
+The repo also includes `runtime.txt` so App Platform does not guess the Python
+version. DigitalOcean's Python buildpack defaults to Python `3.13.x` when no
+runtime is specified; RideLoop pins Python `3.11` for this private Garmin
+integration.
 
 DigitalOcean lets you add env vars after the app is created: open the app, go to
 **Settings**, click the web service component, find **Environment Variables**,

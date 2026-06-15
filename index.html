@@ -101,6 +101,10 @@
               <input id="firstTurnRightInput" name="firstTurnRight" type="checkbox" checked />
               <label for="firstTurnRightInput">First turn right</label>
             </div>
+            <div class="checkbox-row">
+              <input id="favorStravaInput" name="favorStrava" type="checkbox" />
+              <label for="favorStravaInput">Favor Strava segments</label>
+            </div>
             <label for="avoidRoadsInput">Avoid Roads</label>
             <input
               id="avoidRoadsInput"
@@ -136,6 +140,20 @@
                 placeholder="Optional for live routing"
               />
               <button type="button" id="saveKeyButton">Save</button>
+            </div>
+          </section>
+
+          <section class="control-section">
+            <label for="stravaTokenInput">Strava access token</label>
+            <div class="input-row">
+              <input
+                id="stravaTokenInput"
+                name="stravaToken"
+                type="password"
+                autocomplete="off"
+                placeholder="Optional segment scoring"
+              />
+              <button type="button" id="saveStravaKeyButton">Save</button>
             </div>
           </section>
 
@@ -182,6 +200,6 @@
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="app.js?v=20260609-ors-key-guard"></script>
+    <script src="app.js?v=20260615-strava-segments"></script>
   </body>
 </html>

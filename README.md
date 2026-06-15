@@ -16,6 +16,7 @@ This repo has one primary tool and one paused experiment:
 - Generate routes with the road-bike profile.
 - Add an openrouteservice API key for live bicycle routing.
 - The live routing key must be an openrouteservice key, not a Google Maps key.
+- Add a Strava access token and turn on **Favor Strava segments** to bias live route candidates toward nearby riding segments.
 - Export the generated route as a `.gpx` or `.tcx` file.
 - Save your home address to show estimated ORS drive time from home to the selected ride start when an ORS key is available.
 - Keep **Avoid out-and-backs** on to score several route candidates and choose the one with less backtracking and fewer spur-like sections.
@@ -56,6 +57,19 @@ Garmin Connect has two upload flows:
 For an Edge 1040 route, use **Courses > Import**. If Garmin Connect rejects the upload, connect the Edge 1040 over USB and copy the `.gpx` or `.tcx` file into `Garmin/NewFiles`, then eject the device so it can process the file into a course.
 
 The **Garmin GPX** export is intentionally conservative because Garmin Connect's course importer is picky. **Enhanced GPX** adds waypoints and route points for apps that handle richer GPX files.
+
+## Strava Segments
+
+The Strava segment option is a static, personal-use integration. Paste a Strava
+OAuth access token into the app and save it locally in this browser. With
+**Favor Strava segments** on, RideLoop queries Strava's `segments/explore`
+endpoint around the ride area, draws nearby riding segments on the map, and
+scores ORS route candidates higher when they pass close to those segment
+polylines.
+
+Do not paste a Strava client secret into the browser. Access tokens expire, so
+you may need to paste a fresh token. A full OAuth refresh flow would need a small
+backend or serverless function.
 
 ## Paused Google Route Tool
 

@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Cycle Route Lab</title>
+    <link rel="icon" type="image/png" href="rideloop_icon.png" />
+    <link rel="apple-touch-icon" href="rideloop_icon.png" />
     <link
       rel="stylesheet"
       href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -14,9 +16,19 @@
     <div class="app-shell">
       <aside class="route-panel" aria-label="Cycling route controls">
         <header class="brand-row">
-          <div>
-            <p class="eyebrow">Cycle Route Lab</p>
-            <h1>Build a safer loop</h1>
+          <div class="brand-lockup">
+            <img
+              class="brand-icon"
+              src="rideloop_icon.png"
+              alt=""
+              width="56"
+              height="56"
+              decoding="async"
+            />
+            <div>
+              <p class="eyebrow">Cycle Route Lab</p>
+              <h1>Build a safer loop</h1>
+            </div>
           </div>
           <span class="source-badge" id="sourceBadge">Preview</span>
         </header>

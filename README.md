@@ -67,6 +67,14 @@ endpoint around the ride area, draws nearby riding segments on the map, and
 scores ORS route candidates higher when they pass close to those segment
 polylines.
 
+Strava's explore API returns only the top 10 segments per map box, so RideLoop
+tiles the ride area into smaller searches and de-duplicates the results. This
+improves coverage, but it still cannot guarantee every Strava segment near the
+route is available to the scorer. To stay under Strava read limits while
+testing, RideLoop searches the closest boxes first, stops early once it has
+enough nearby segment candidates, and caches segment discovery for the same
+start area and ride distance for 45 minutes.
+
 Do not paste a Strava client secret into the browser. Access tokens expire, so
 you may need to paste a fresh token. A full OAuth refresh flow would need a small
 backend or serverless function.

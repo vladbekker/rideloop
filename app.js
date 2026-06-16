@@ -1,16 +1,27 @@
 const METERS_PER_MILE = 1609.344;
 const CLOSURE_RADIUS_METERS = 180;
-const STRAVA_SEGMENT_MATCH_METERS = 45;
+const STRAVA_SEGMENT_MATCH_METERS = 60;
 const STRAVA_ROUTE_SAMPLE_METERS = 90;
-const STRAVA_SCORE_PER_METER = 1.8;
-const STRAVA_SCORE_PER_SEGMENT = 1200;
-const STRAVA_MAX_EXPLORE_BOXES = 9;
+const STRAVA_SCORE_PER_METER = 2.2;
+const STRAVA_SCORE_PER_SEGMENT = 2600;
+const STRAVA_MAX_EXPLORE_BOXES = 13;
+const STRAVA_SEGMENT_CACHE_MS = 45 * 60 * 1000;
+const STRAVA_STALE_SEGMENT_CACHE_MS = 24 * 60 * 60 * 1000;
+const STRAVA_MAX_CACHE_ENTRIES = 18;
+const STRAVA_ANCHOR_MAX_SEGMENTS = 5;
+const STRAVA_ANCHOR_MIN_SPACING_METERS = 900;
+const STRAVA_LOOP_SPUR_MULTIPLIER = 3.2;
+const STRAVA_SPUR_METER_PENALTY = 16;
+const STRAVA_MIN_SEGMENT_MATCH_METERS = 220;
+const STRAVA_MIN_MATCH_SECTION_METERS = 180;
+const STRAVA_DISTANCE_FALLBACK_WINDOW_METERS = 0.35 * METERS_PER_MILE;
 const DEFAULT_CENTER = { lat: 40.73061, lng: -73.935242 };
 const STORAGE_KEYS = {
   homeAddress: "cycle-route-lab.home-address",
   homeLocation: "cycle-route-lab.home-location",
   orsKey: "cycle-route-lab.ors-key",
   stravaToken: "cycle-route-lab.strava-token",
+  stravaSegmentCache: "cycle-route-lab.strava-segments-cache.v1",
   lastStart: "cycle-route-lab.last-start",
   closures: "cycle-route-lab.closures",
   waypoints: "cycle-route-lab.waypoints",
@@ -64,6 +75,7 @@ const state = {
   routeLayer: null,
   spurLayer: null,
   stravaLayer: null,
+  stravaMatchLayer: null,
   routeHistory: [],
   closureLayer: null,
   closures: loadClosures(),
@@ -384,8 +396,10 @@ async function buildRoute() {
   } catch (error) {
     if (orsKey) {
       clearRouteDisplay();
+      const isStravaError =
+        error.isStrava || /strava|rate limit/i.test(String(error.message || ""));
       const failureText =
-        favorStrava && String(error.message || "").includes("Strava")
+        favorStrava && isStravaError
           ? " Route build stopped before ORS candidate scoring."
           : " Live routing failed, so no preview route was shown.";
 
@@ -482,18 +496,36 @@ async function buildOpenRouteServiceLoop(start, targetMiles, apiKey, options = {
     avoidTerms: getAvoidRoadTerms(),
     favorStrava: elements.favorStravaInput.checked,
     stravaSegments: [],
+    stravaSearchBoxCount: 0,
+    stravaSearchFromCache: false,
+    stravaSearchStale: false,
+    targetMeters: targetMiles * METERS_PER_MILE,
   };
 
   if (preferences.favorStrava) {
-    preferences.stravaSegments = await fetchNearbyStravaSegments(
+    const stravaDiscovery = await fetchNearbyStravaSegments(
       start,
       targetMiles,
       options.stravaToken,
     );
+    preferences.stravaSegments = stravaDiscovery.segments;
+    preferences.stravaSearchBoxCount = stravaDiscovery.boxCount;
+    preferences.stravaSearchFromCache = Boolean(stravaDiscovery.fromCache);
+    preferences.stravaSearchStale = Boolean(stravaDiscovery.stale);
     drawStravaSegments(preferences.stravaSegments);
+    const sourceText = stravaDiscovery.fromCache
+      ? stravaDiscovery.stale
+        ? "cached stale"
+        : "cached"
+      : stravaDiscovery.limited
+        ? "partial fresh"
+      : "fresh";
+
     setStatus(
       `Found ${preferences.stravaSegments.length} Strava segment${
         preferences.stravaSegments.length === 1 ? "" : "s"
+      } from ${preferences.stravaSearchBoxCount} ${sourceText} map search${
+        preferences.stravaSearchBoxCount === 1 ? "" : "es"
       }. Building route candidates...`,
     );
   } else {
@@ -521,9 +553,36 @@ async function buildOpenRouteServiceLoop(start, targetMiles, apiKey, options = {
     preferences.familySafe ||
     preferences.avoidTerms.length > 0 ||
     preferences.favorStrava;
-  const candidateCount = needsScoring ? getCandidateCount(targetMiles) : 1;
+  const candidateCount = preferences.favorStrava
+    ? getStravaCandidateCount(targetMiles)
+    : needsScoring
+      ? getCandidateCount(targetMiles)
+      : 1;
   const candidates = [];
   let lastError = null;
+
+  if (preferences.favorStrava && preferences.stravaSegments.length) {
+    const anchorOffsets = [0, 1, 2];
+
+    for (const offset of anchorOffsets) {
+      try {
+        const route = await fetchOpenRouteServiceStravaAnchorLoop(
+          start,
+          targetMiles,
+          apiKey,
+          preferences,
+          offset,
+        );
+
+        if (route) {
+          route.quality = scoreRouteQuality(route, preferences);
+          candidates.push(route);
+        }
+      } catch (error) {
+        lastError = error;
+      }
+    }
+  }
 
   for (let index = 0; index < candidateCount; index += 1) {
     try {
@@ -546,12 +605,16 @@ async function buildOpenRouteServiceLoop(start, targetMiles, apiKey, options = {
     throw lastError || new Error("Live cycling route failed.");
   }
 
-  candidates.sort((a, b) => a.quality.score - b.quality.score);
-  const route = candidates[0];
+  const candidatePool = preferences.favorStrava
+    ? selectStravaCandidatePool(candidates, preferences.targetMeters)
+    : candidates;
+
+  candidatePool.sort((a, b) => a.quality.score - b.quality.score);
+  const route = candidatePool[0];
 
   route.status =
     candidateCount > 1
-      ? createCandidateStatus(route, candidates.length)
+      ? createCandidateStatus(route, candidatePool.length, candidates.length)
       : "Live cycling route built.";
 
   return route;
@@ -649,13 +712,222 @@ async function fetchOpenRouteServiceWaypointLoop(
   return route;
 }
 
+async function fetchOpenRouteServiceStravaAnchorLoop(
+  start,
+  targetMiles,
+  apiKey,
+  preferences,
+  offset,
+) {
+  const selectedSegments = selectStravaAnchorSegments(
+    start,
+    targetMiles,
+    preferences.stravaSegments,
+    offset,
+  );
+
+  if (selectedSegments.length < 2) return null;
+
+  const coordinates = buildStravaAnchorCoordinates(start, selectedSegments);
+
+  if (coordinates.length < 5) return null;
+
+  const profile = elements.profileSelect.value;
+  const fitness = Number(elements.fitnessSelect.value);
+  const options = createOrsRoutingOptions(fitness);
+  const response = await fetch(
+    `https://api.openrouteservice.org/v2/directions/${profile}/geojson`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: apiKey,
+        "Content-Type": "application/json",
+        Accept: "application/json, application/geo+json",
+      },
+      body: JSON.stringify({
+        coordinates,
+        elevation: true,
+        instructions: true,
+        extra_info: ["waytype", "suitability", "waycategory"],
+        options,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    const details = await readErrorMessage(response);
+    throw new Error(details || "Strava anchor routing failed.");
+  }
+
+  const route = createRouteFromOrsGeojson(
+    await response.json(),
+    targetMiles,
+    "Cohesive Strava loop built.",
+  );
+
+  route.stravaAnchorCount = selectedSegments.length;
+  route.stravaAnchorSegmentIds = selectedSegments.map((segment) => segment.id);
+
+  return route;
+}
+
+function selectStravaAnchorSegments(start, targetMiles, segments, offset) {
+  const targetMeters = targetMiles * METERS_PER_MILE;
+  const preferredRadiusMeters = targetMeters / (Math.PI * 2);
+  const maxDistanceMeters = Math.min(Math.max(targetMeters * 0.58, 4500), 22000);
+  const maxAnchorSegments = getStravaAnchorMaxSegments(targetMiles);
+  const minAngularSpacing = 360 / (maxAnchorSegments + 1.4);
+  const enrichedSegments = segments
+    .map((segment) => enrichStravaAnchorSegment(start, segment, preferredRadiusMeters))
+    .filter(
+      (item) =>
+        item &&
+        item.distanceFromStart <= maxDistanceMeters &&
+        item.endpointDistance >= item.segment.distanceMeters * 0.42,
+    )
+    .sort((a, b) => b.score - a.score);
+  const selected = [];
+
+  enrichedSegments.forEach((item) => {
+    if (selected.length >= maxAnchorSegments) return;
+
+    const overlaps = selected.some(
+      (existing) =>
+        angleDistanceDegrees(existing.angle, item.angle) < minAngularSpacing ||
+        haversineMeters(existing.midpoint, item.midpoint) <
+          STRAVA_ANCHOR_MIN_SPACING_METERS,
+    );
+
+    if (!overlaps) {
+      selected.push(item);
+    }
+  });
+
+  const ordered = selected
+    .sort((a, b) => a.angle - b.angle)
+    .map((item) => item.segment);
+
+  if (ordered.length <= 1) return ordered;
+
+  const rotation = offset % ordered.length;
+  const rotated = [...ordered.slice(rotation), ...ordered.slice(0, rotation)];
+
+  return offset % 2 === 1 ? rotated.reverse() : rotated;
+}
+
+function getStravaAnchorMaxSegments(targetMiles) {
+  if (targetMiles <= 6) return 2;
+  if (targetMiles <= 9) return 3;
+  if (targetMiles <= 15) return 4;
+
+  return STRAVA_ANCHOR_MAX_SEGMENTS;
+}
+
+function enrichStravaAnchorSegment(start, segment, preferredRadiusMeters) {
+  if (!segment?.points?.length) return null;
+
+  const first = segment.points[0];
+  const last = segment.points[segment.points.length - 1];
+  const midpoint = pointAtPolylineFraction(segment.points, 0.5);
+  const distanceFromStart = haversineMeters(start, midpoint);
+  const endpointDistance = haversineMeters(first, last);
+  const radiusPenalty = Math.abs(distanceFromStart - preferredRadiusMeters) * 0.38;
+
+  return {
+    segment,
+    midpoint,
+    endpointDistance,
+    distanceFromStart,
+    angle: normalizeDegrees(bearingDegrees(start, midpoint)),
+    score: segment.distanceMeters - radiusPenalty,
+  };
+}
+
+function buildStravaAnchorCoordinates(start, segments) {
+  const coordinates = [[start.lng, start.lat]];
+  let previousPoint = start;
+
+  segments.forEach((segment) => {
+    const points = orientStravaSegmentPoints(previousPoint, segment.points);
+    const anchors = createStravaSegmentAnchors(points, segment.distanceMeters);
+
+    anchors.forEach((point) => {
+      appendCoordinateIfDistinct(coordinates, point);
+    });
+
+    previousPoint = anchors[anchors.length - 1] || previousPoint;
+  });
+
+  appendCoordinateIfDistinct(coordinates, start, 20);
+
+  return coordinates;
+}
+
+function orientStravaSegmentPoints(previousPoint, points) {
+  const first = points[0];
+  const last = points[points.length - 1];
+
+  if (haversineMeters(previousPoint, last) < haversineMeters(previousPoint, first)) {
+    return [...points].reverse();
+  }
+
+  return points;
+}
+
+function createStravaSegmentAnchors(points, distanceMeters) {
+  const anchors = [points[0]];
+
+  if (distanceMeters >= 700) {
+    anchors.push(pointAtPolylineFraction(points, 0.5));
+  }
+
+  anchors.push(points[points.length - 1]);
+
+  return anchors;
+}
+
+function appendCoordinateIfDistinct(coordinates, point, minDistanceMeters = 90) {
+  const previous = coordinates[coordinates.length - 1];
+  const previousPoint = { lng: previous[0], lat: previous[1] };
+
+  if (haversineMeters(previousPoint, point) < minDistanceMeters) return;
+
+  coordinates.push([point.lng, point.lat]);
+}
+
+function pointAtPolylineFraction(points, fraction) {
+  const totalMeters = measureRoute(points);
+
+  if (!points.length) return null;
+  if (totalMeters <= 0) return points[0];
+
+  return pointAtRouteDistance(points, totalMeters * fraction) || points[0];
+}
+
 async function fetchNearbyStravaSegments(start, targetMiles, accessToken) {
   const boundsList = createStravaExploreBounds(start, targetMiles);
+  const cacheKey = createStravaSegmentCacheKey(start, targetMiles);
+  const cachedDiscovery = readStravaSegmentCache(cacheKey);
+
+  if (cachedDiscovery) {
+    return {
+      ...cachedDiscovery,
+      fromCache: true,
+      stale: false,
+    };
+  }
+
+  const staleDiscovery = readStravaSegmentCache(cacheKey, {
+    maxAgeMs: STRAVA_STALE_SEGMENT_CACHE_MS,
+  });
   const segmentsById = new Map();
+  let searchedBoxCount = 0;
 
   try {
     for (const bounds of boundsList) {
       const segments = await fetchStravaExploreBox(bounds, accessToken);
+
+      searchedBoxCount += 1;
 
       segments.forEach((segment) => {
         const normalized = normalizeStravaSegment(segment);
@@ -664,10 +936,38 @@ async function fetchNearbyStravaSegments(start, targetMiles, accessToken) {
           segmentsById.set(normalized.id, normalized);
         }
       });
+
+      if (
+        searchedBoxCount >= getMinStravaExploreBoxes(targetMiles) &&
+        segmentsById.size >= getStravaDiscoveryTargetSegmentCount(targetMiles)
+      ) {
+        break;
+      }
     }
   } catch (error) {
+    if (error.isStravaRateLimited && segmentsById.size) {
+      const discovery = createStravaDiscovery(searchedBoxCount, segmentsById);
+
+      writeStravaSegmentCache(cacheKey, discovery);
+
+      return {
+        ...discovery,
+        fromCache: false,
+        stale: false,
+        limited: true,
+      };
+    }
+
+    if ((error.isStravaRateLimited || error instanceof TypeError) && staleDiscovery) {
+      return {
+        ...staleDiscovery,
+        fromCache: true,
+        stale: true,
+      };
+    }
+
     if (error instanceof TypeError) {
-      throw new Error(
+      throw createStravaError(
         "Strava segment lookup failed. If the browser blocks Strava requests, this static setup may need a small proxy.",
       );
     }
@@ -675,9 +975,25 @@ async function fetchNearbyStravaSegments(start, targetMiles, accessToken) {
     throw error;
   }
 
-  return [...segmentsById.values()].sort(
-    (a, b) => b.distanceMeters - a.distanceMeters,
-  );
+  const discovery = createStravaDiscovery(searchedBoxCount, segmentsById);
+
+  writeStravaSegmentCache(cacheKey, discovery);
+
+  return {
+    ...discovery,
+    fromCache: false,
+    stale: false,
+    limited: false,
+  };
+}
+
+function createStravaDiscovery(boxCount, segmentsById) {
+  return {
+    boxCount,
+    segments: [...segmentsById.values()].sort(
+      (a, b) => b.distanceMeters - a.distanceMeters,
+    ),
+  };
 }
 
 async function fetchStravaExploreBox(bounds, accessToken) {
@@ -696,13 +1012,25 @@ async function fetchStravaExploreBox(bounds, accessToken) {
   );
 
   if (response.status === 401 || response.status === 403) {
-    throw new Error("Strava token was rejected or expired.");
+    throw createStravaError("Strava token was rejected or expired.");
+  }
+
+  if (response.status === 429) {
+    throw createStravaError(
+      "Strava rate limit exceeded. Wait for the 15-minute read window to reset or turn off Favor Strava segments.",
+      {
+        rateLimited: true,
+      },
+    );
   }
 
   if (!response.ok) {
     const details = await readErrorMessage(response);
+    const message = details || "Strava segment lookup failed.";
 
-    throw new Error(details || "Strava segment lookup failed.");
+    throw createStravaError(message, {
+      rateLimited: /rate limit/i.test(message),
+    });
   }
 
   const data = await response.json();
@@ -713,12 +1041,12 @@ async function fetchStravaExploreBox(bounds, accessToken) {
 function createStravaExploreBounds(start, targetMiles) {
   const targetMeters = targetMiles * METERS_PER_MILE;
   const searchRadiusMeters = Math.min(
-    Math.max(targetMeters * 0.45, 2500),
-    18000,
+    Math.max(targetMeters * 0.42, 2600),
+    22000,
   );
-  const isShortRoute = targetMiles <= 7;
-  const offsets = isShortRoute ? [-0.35, 0.35] : [-0.58, 0, 0.58];
-  const halfSizeMeters = searchRadiusMeters * (isShortRoute ? 0.55 : 0.44);
+  const gridSize = targetMiles <= 10 ? 3 : 5;
+  const offsets = createCenteredFactors(gridSize, gridSize === 3 ? 0.72 : 0.8);
+  const halfSizeMeters = searchRadiusMeters * (gridSize === 3 ? 0.42 : 0.28);
   const bounds = [];
 
   offsets.forEach((eastFactor) => {
@@ -736,16 +1064,143 @@ function createStravaExploreBounds(start, targetMiles) {
         north + halfSizeMeters,
       );
 
-      bounds.push([
-        roundCoordinate(clampLatitude(southwest.lat)),
-        roundCoordinate(clampLongitude(southwest.lng)),
-        roundCoordinate(clampLatitude(northeast.lat)),
-        roundCoordinate(clampLongitude(northeast.lng)),
-      ]);
+      bounds.push({
+        distanceFromCenter: Math.hypot(eastFactor, northFactor),
+        bounds: [
+          roundCoordinate(clampLatitude(southwest.lat)),
+          roundCoordinate(clampLongitude(southwest.lng)),
+          roundCoordinate(clampLatitude(northeast.lat)),
+          roundCoordinate(clampLongitude(northeast.lng)),
+        ],
+      });
     });
   });
 
-  return bounds.slice(0, STRAVA_MAX_EXPLORE_BOXES);
+  return bounds
+    .sort((a, b) => a.distanceFromCenter - b.distanceFromCenter)
+    .slice(0, STRAVA_MAX_EXPLORE_BOXES)
+    .map((item) => item.bounds);
+}
+
+function getMinStravaExploreBoxes(targetMiles) {
+  if (targetMiles <= 6) return 3;
+  if (targetMiles <= 10) return 5;
+
+  return 7;
+}
+
+function getStravaDiscoveryTargetSegmentCount(targetMiles) {
+  if (targetMiles <= 6) return 18;
+  if (targetMiles <= 10) return 24;
+  if (targetMiles <= 15) return 32;
+
+  return 40;
+}
+
+function createStravaSegmentCacheKey(start, targetMiles) {
+  const latBucket = Math.round(Number(start.lat) * 100) / 100;
+  const lngBucket = Math.round(Number(start.lng) * 100) / 100;
+  const distanceBucket = Math.max(2, Math.round(Number(targetMiles)));
+
+  return [
+    "v2",
+    latBucket.toFixed(2),
+    lngBucket.toFixed(2),
+    distanceBucket,
+    STRAVA_MAX_EXPLORE_BOXES,
+  ].join(":");
+}
+
+function readStravaSegmentCache(cacheKey, options = {}) {
+  const cache = loadJson(STORAGE_KEYS.stravaSegmentCache) || {};
+  const entry = cache[cacheKey];
+  const maxAgeMs = options.maxAgeMs || STRAVA_SEGMENT_CACHE_MS;
+
+  if (!entry || Date.now() - Number(entry.savedAt) > maxAgeMs) return null;
+
+  const segments = Array.isArray(entry.segments)
+    ? entry.segments.map(normalizeCachedStravaSegment).filter(Boolean)
+    : [];
+
+  return {
+    boxCount: Number(entry.boxCount) || 0,
+    segments,
+  };
+}
+
+function writeStravaSegmentCache(cacheKey, discovery) {
+  try {
+    const cache = loadJson(STORAGE_KEYS.stravaSegmentCache) || {};
+
+    cache[cacheKey] = {
+      savedAt: Date.now(),
+      boxCount: discovery.boxCount,
+      segments: discovery.segments.map((segment) => ({
+        id: segment.id,
+        name: segment.name,
+        distanceMeters: segment.distanceMeters,
+        avgGrade: segment.avgGrade,
+        starred: segment.starred,
+        points: segment.points,
+      })),
+    };
+
+    const entries = Object.entries(cache)
+      .sort(([, a], [, b]) => Number(b.savedAt) - Number(a.savedAt))
+      .slice(0, STRAVA_MAX_CACHE_ENTRIES);
+
+    localStorage.setItem(
+      STORAGE_KEYS.stravaSegmentCache,
+      JSON.stringify(Object.fromEntries(entries)),
+    );
+  } catch {
+    // Local storage can be full or disabled. Routing still works without cache.
+  }
+}
+
+function normalizeCachedStravaSegment(segment) {
+  if (!segment?.id || !Array.isArray(segment.points)) return null;
+
+  const points = segment.points
+    .map((point) => ({
+      lat: Number(point.lat),
+      lng: Number(point.lng),
+    }))
+    .filter((point) => isValidPoint(point));
+
+  if (points.length < 2) return null;
+
+  return {
+    id: String(segment.id),
+    name: segment.name || "Strava segment",
+    distanceMeters: Number(segment.distanceMeters) || measureRoute(points),
+    avgGrade: Number(segment.avgGrade) || 0,
+    starred: Boolean(segment.starred),
+    points,
+  };
+}
+
+function createStravaError(message, options = {}) {
+  const error = new Error(message);
+
+  error.isStrava = true;
+  error.isStravaRateLimited = Boolean(options.rateLimited);
+
+  return error;
+}
+
+function createCenteredFactors(count, maxAbsValue) {
+  if (count <= 1) return [0];
+
+  const values = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const ratio = index / (count - 1);
+
+    values.push((ratio * 2 - 1) * maxAbsValue);
+  }
+
+  return values;
 }
 
 function normalizeStravaSegment(segment) {
@@ -868,6 +1323,7 @@ function createRouteFromOrsGeojson(geojson, targetMiles, status) {
     extras: properties.extras || {},
     segments: properties.segments || [],
     distanceMeters,
+    targetMeters: targetMiles * METERS_PER_MILE,
     durationSeconds: summary.duration || estimateRideSeconds(distanceMeters),
     source: "openrouteservice",
     status,
@@ -987,6 +1443,7 @@ function buildPreviewLoop(start, targetMiles) {
     name: createRouteName(targetMiles),
     points,
     distanceMeters,
+    targetMeters: targetMiles * METERS_PER_MILE,
     durationSeconds: estimateRideSeconds(distanceMeters),
     source: "preview",
     status: "Preview only, not real streets. Add an ORS key for live bike routing.",
@@ -1050,14 +1507,27 @@ function applyStartDirectionPreference(route) {
   const loop = scoreLoopQuality(points);
   const safety = route.quality?.safety || null;
   const strava = route.quality?.strava?.enabled
-    ? scoreRouteStrava({ points }, route.quality.strava.segments)
+    ? scoreRouteStrava(
+        { points },
+        route.quality.strava.segments,
+        route.quality.strava.searchBoxCount,
+      )
     : route.quality?.strava || null;
+  const distanceFit = scoreDistanceFit({
+    distanceMeters,
+    targetMeters: route.targetMeters,
+  });
   const quality = route.quality
     ? {
         ...route.quality,
-        score: loop.score + (safety?.score || 0) + (strava?.score || 0),
+        score:
+          loop.score +
+          (safety?.score || 0) +
+          (strava?.score || 0) +
+          distanceFit.score,
         loop,
         strava,
+        distanceFit,
       }
     : route.quality;
 
@@ -1173,8 +1643,8 @@ function drawStravaSegments(segments) {
       dashArray: "4 7",
       lineCap: "round",
       lineJoin: "round",
-      opacity: 0.48,
-      weight: 4,
+      opacity: 0.24,
+      weight: 3,
     }).addTo(state.stravaLayer);
 
     layer.bindTooltip(
@@ -1190,10 +1660,54 @@ function drawStravaSegments(segments) {
 }
 
 function clearStravaSegments() {
-  if (!state.stravaLayer) return;
+  if (state.stravaLayer) {
+    state.stravaLayer.remove();
+    state.stravaLayer = null;
+  }
 
-  state.stravaLayer.remove();
-  state.stravaLayer = null;
+  if (state.stravaMatchLayer) {
+    state.stravaMatchLayer.remove();
+    state.stravaMatchLayer = null;
+  }
+}
+
+function drawMatchedStravaSegments(route) {
+  if (state.stravaMatchLayer) {
+    state.stravaMatchLayer.remove();
+    state.stravaMatchLayer = null;
+  }
+
+  const matchedSections = route.quality?.strava?.matchedSections || [];
+
+  if (!matchedSections.length) return;
+
+  state.stravaMatchLayer = L.layerGroup().addTo(map);
+
+  matchedSections.forEach((section) => {
+    if (!section.points?.length) return;
+
+    const layer = L.polyline(
+      section.points.map((point) => [point.lat, point.lng]),
+      {
+        bubblingMouseEvents: false,
+        color: "#fc4c02",
+        opacity: 0.82,
+        weight: 5,
+        lineCap: "round",
+        lineJoin: "round",
+      },
+    ).addTo(state.stravaMatchLayer);
+
+    layer.bindTooltip(
+      `Matched Strava: ${escapeHtml(
+        section.segmentNames.join("; ") || "segment",
+      )} (${formatDistance(section.meters)})`,
+      {
+        direction: "top",
+        sticky: true,
+      },
+    );
+  });
 }
 
 function drawRoute(route, options = {}) {
@@ -1237,6 +1751,7 @@ function drawRoute(route, options = {}) {
   elements.downloadTcxButton.disabled = false;
   elements.shareButton.disabled = false;
   updateUndoButton();
+  drawMatchedStravaSegments(route);
   drawSpurCleanup(route);
 }
 
@@ -1324,21 +1839,31 @@ function createDisplayStatus(route) {
 function createStravaStatusText(strava) {
   if (!strava?.enabled) return "";
 
+  const sourceText = strava.fromCache
+    ? strava.stale
+      ? " cached stale"
+      : " cached"
+    : "";
+
   if (!strava.segmentCount) {
-    return " No Strava riding segments found nearby.";
+    return ` No Strava riding segments found in ${strava.searchBoxCount || 0}${sourceText} map search${
+      strava.searchBoxCount === 1 ? "" : "es"
+    }.`;
   }
 
   if (!strava.matchedCount) {
     return ` Strava: checked ${strava.segmentCount} nearby segment${
       strava.segmentCount === 1 ? "" : "s"
+    } from ${strava.searchBoxCount || 0}${sourceText} map search${
+      strava.searchBoxCount === 1 ? "" : "es"
     }, no close route matches.`;
   }
 
   const segmentList = formatStravaSegmentList(strava.matchedSegments);
   const segmentText = segmentList ? `: ${segmentList}` : "";
 
-  return ` Strava: matched ${strava.matchedCount} segment${
-    strava.matchedCount === 1 ? "" : "s"
+  return ` Strava: matched ${strava.matchedCount} of ${strava.segmentCount} discovered segment${
+    strava.segmentCount === 1 ? "" : "s"
   } (${formatDistance(strava.matchedMeters)} nearby)${segmentText}.`;
 }
 
@@ -1381,16 +1906,26 @@ function removeRouteSpur(spur) {
     stateRoadMeters: 0,
   };
   const strava = route.quality?.strava?.enabled
-    ? scoreRouteStrava({ points }, route.quality.strava.segments)
+    ? scoreRouteStrava(
+        { points },
+        route.quality.strava.segments,
+        route.quality.strava.searchBoxCount,
+      )
     : route.quality?.strava || {
         enabled: false,
         score: 0,
         segmentCount: 0,
+        searchBoxCount: 0,
         matchedCount: 0,
         matchedMeters: 0,
         segments: [],
         matchedSegments: [],
+        matchedSections: [],
       };
+  const distanceFit = scoreDistanceFit({
+    distanceMeters,
+    targetMeters: route.targetMeters,
+  });
   const editedRoute = {
     ...route,
     points,
@@ -1398,10 +1933,15 @@ function removeRouteSpur(spur) {
     durationSeconds,
     status: `Removed ${formatDistance(spur.meters)} spur from route.`,
     quality: {
-      score: loop.score + (safety.score || 0) + (strava.score || 0),
+      score:
+        loop.score +
+        (safety.score || 0) +
+        (strava.score || 0) +
+        distanceFit.score,
       loop,
       safety,
       strava,
+      distanceFit,
     },
   };
 
@@ -1435,6 +1975,9 @@ function cloneRoute(route) {
           strava: route.quality.strava
             ? cloneStravaQuality(route.quality.strava)
             : route.quality.strava,
+          distanceFit: route.quality.distanceFit
+            ? { ...route.quality.distanceFit }
+            : route.quality.distanceFit,
         }
       : route.quality,
     cleanupSpurs: route.cleanupSpurs?.map((spur) => ({ ...spur })) || [],
@@ -1445,7 +1988,13 @@ function cloneStravaQuality(strava) {
   return {
     ...strava,
     segments: strava.segments?.map(cloneStravaSegment) || [],
-    matchedSegments: strava.matchedSegments?.map((segment) => ({ ...segment })) || [],
+    matchedSegments: strava.matchedSegments?.map(cloneStravaSegment) || [],
+    matchedSections:
+      strava.matchedSections?.map((section) => ({
+        ...section,
+        points: section.points?.map((point) => ({ ...point })) || [],
+        segmentNames: [...(section.segmentNames || [])],
+      })) || [],
   };
 }
 
@@ -1822,6 +2371,64 @@ function getCandidateCount(targetMiles) {
   return 20;
 }
 
+function getStravaCandidateCount(targetMiles) {
+  if (targetMiles <= 7) return 18;
+  if (targetMiles <= 15) return 24;
+  return 30;
+}
+
+function selectStravaCandidatePool(candidates, targetMeters) {
+  const maxSpurMeters = Math.max(160, targetMeters * 0.018);
+  const maxReversedOverlapMeters = Math.max(220, targetMeters * 0.025);
+  const distanceBand = getStravaDistanceBand(targetMeters);
+  const onDistanceCandidates = candidates.filter(
+    (route) =>
+      route.distanceMeters >= distanceBand.minMeters &&
+      route.distanceMeters <= distanceBand.maxMeters,
+  );
+  const distancePool = onDistanceCandidates.length
+    ? onDistanceCandidates
+    : getClosestDistanceCandidates(candidates, targetMeters);
+  const cleanCandidates = distancePool.filter((route) => {
+    const loop = route.quality?.loop;
+
+    if (!loop) return true;
+
+    return (
+      loop.spurMeters <= maxSpurMeters &&
+      loop.reversedOverlapMeters <= maxReversedOverlapMeters &&
+      loop.uTurns <= 2
+    );
+  });
+
+  return cleanCandidates.length ? cleanCandidates : distancePool;
+}
+
+function getStravaDistanceBand(targetMeters) {
+  const underageMeters = Math.max(0.6 * METERS_PER_MILE, targetMeters * 0.18);
+  const overageMeters = Math.max(0.8 * METERS_PER_MILE, targetMeters * 0.2);
+
+  return {
+    minMeters: Math.max(targetMeters - underageMeters, targetMeters * 0.55),
+    maxMeters: targetMeters + overageMeters,
+  };
+}
+
+function getClosestDistanceCandidates(candidates, targetMeters) {
+  const sorted = [...candidates].sort(
+    (a, b) =>
+      Math.abs(a.distanceMeters - targetMeters) -
+      Math.abs(b.distanceMeters - targetMeters),
+  );
+  const closestDifference = Math.abs(sorted[0]?.distanceMeters - targetMeters) || 0;
+
+  return sorted.filter(
+    (route) =>
+      Math.abs(route.distanceMeters - targetMeters) <=
+      closestDifference + STRAVA_DISTANCE_FALLBACK_WINDOW_METERS,
+  );
+}
+
 function getAvoidRoadTerms() {
   return elements.avoidRoadsInput.value
     .split(",")
@@ -1829,11 +2436,19 @@ function getAvoidRoadTerms() {
     .filter(Boolean);
 }
 
-function createCandidateStatus(route, count) {
+function createCandidateStatus(route, count, totalCount = count) {
   const strava = route.quality?.strava;
 
   if (strava?.enabled) {
-    return `Picked Strava-friendly of ${count} options.`;
+    if (route.stravaAnchorCount) {
+      return `Picked cohesive Strava loop of ${totalCount} options using ${route.stravaAnchorCount} ordered segment anchor${
+        route.stravaAnchorCount === 1 ? "" : "s"
+      }.`;
+    }
+
+    return count === totalCount
+      ? `Picked Strava-friendly of ${totalCount} options.`
+      : `Picked clean Strava-friendly loop from ${count} of ${totalCount} options.`;
   }
 
   const stateRoadMeters = route.quality?.safety?.stateRoadMeters || 0;
@@ -1863,7 +2478,7 @@ function createCandidateStatus(route, count) {
 }
 
 function scoreRouteQuality(route, preferences) {
-  const loop = preferences.avoidBacktracks
+  const loop = preferences.avoidBacktracks || preferences.favorStrava
     ? scoreLoopQuality(route.points)
     : {
         score: 0,
@@ -1875,22 +2490,62 @@ function scoreRouteQuality(route, preferences) {
       };
   const safety = scoreRoadSafety(route, preferences);
   const strava = preferences.favorStrava
-    ? scoreRouteStrava(route, preferences.stravaSegments)
+    ? scoreRouteStrava(
+        route,
+        preferences.stravaSegments,
+        preferences.stravaSearchBoxCount,
+        {
+          fromCache: preferences.stravaSearchFromCache,
+          stale: preferences.stravaSearchStale,
+        },
+      )
     : {
         enabled: false,
         score: 0,
         segmentCount: 0,
+        searchBoxCount: 0,
         matchedCount: 0,
         matchedMeters: 0,
         segments: [],
         matchedSegments: [],
+        matchedSections: [],
       };
+  const distanceFit = scoreDistanceFit(route, preferences);
+  const loopScore = preferences.favorStrava
+    ? loop.score * STRAVA_LOOP_SPUR_MULTIPLIER +
+      loop.spurMeters * STRAVA_SPUR_METER_PENALTY
+    : loop.score;
 
   return {
-    score: loop.score + safety.score + strava.score,
+    score: loopScore + safety.score + strava.score + distanceFit.score,
     loop,
     safety,
     strava,
+    distanceFit,
+  };
+}
+
+function scoreDistanceFit(route, preferences = {}) {
+  const targetMeters = preferences.targetMeters || route.targetMeters;
+
+  if (!targetMeters) {
+    return {
+      score: 0,
+      targetMeters: 0,
+      differenceMeters: 0,
+    };
+  }
+
+  const differenceMeters = Math.abs(route.distanceMeters - targetMeters);
+  const overageMeters = Math.max(0, route.distanceMeters - targetMeters);
+  const freeMeters = Math.max(0.25 * METERS_PER_MILE, targetMeters * 0.06);
+  const penaltyMeters = Math.max(0, differenceMeters - freeMeters);
+  const overagePenaltyMeters = Math.max(0, overageMeters - freeMeters);
+
+  return {
+    score: penaltyMeters * 4.5 + overagePenaltyMeters * 4,
+    targetMeters,
+    differenceMeters,
   };
 }
 
@@ -1950,7 +2605,7 @@ function scoreRoadSafety(route, preferences) {
   };
 }
 
-function scoreRouteStrava(route, segments = []) {
+function scoreRouteStrava(route, segments = [], searchBoxCount = 0, options = {}) {
   const availableSegments = Array.isArray(segments) ? segments : [];
 
   if (!availableSegments.length) {
@@ -1958,16 +2613,20 @@ function scoreRouteStrava(route, segments = []) {
       enabled: true,
       score: 0,
       segmentCount: 0,
+      searchBoxCount,
       matchedCount: 0,
       matchedMeters: 0,
       segments: availableSegments,
       matchedSegments: [],
+      matchedSections: [],
+      fromCache: Boolean(options.fromCache),
+      stale: Boolean(options.stale),
     };
   }
 
   const samples = sampleRoutePoints(route.points, STRAVA_ROUTE_SAMPLE_METERS);
-  const matchedSegmentIds = new Set();
-  let matchedMeters = 0;
+  const rawMatches = [];
+  const matchedMetersBySegmentId = new Map();
 
   samples.forEach((sample) => {
     const segmentId = findNearestStravaSegmentId(
@@ -1978,17 +2637,39 @@ function scoreRouteStrava(route, segments = []) {
 
     if (!segmentId) return;
 
-    matchedSegmentIds.add(segmentId);
-    matchedMeters += sample.weightMeters;
+    rawMatches.push({ ...sample, segmentId });
+    matchedMetersBySegmentId.set(
+      segmentId,
+      (matchedMetersBySegmentId.get(segmentId) || 0) + sample.weightMeters,
+    );
   });
 
+  const validSegmentIds = new Set(
+    [...matchedMetersBySegmentId.entries()]
+      .filter(([, meters]) => meters >= STRAVA_MIN_SEGMENT_MATCH_METERS)
+      .map(([segmentId]) => segmentId),
+  );
+  const validMatches = rawMatches.filter((match) =>
+    validSegmentIds.has(match.segmentId),
+  );
+  const matchedMeters = validMatches.reduce(
+    (total, match) => total + match.weightMeters,
+    0,
+  );
+
   const matchedSegments = availableSegments
-    .filter((segment) => matchedSegmentIds.has(segment.id))
+    .filter((segment) => validSegmentIds.has(segment.id))
     .map((segment) => ({
       id: segment.id,
       name: segment.name,
       distanceMeters: segment.distanceMeters,
+      matchedMeters: matchedMetersBySegmentId.get(segment.id) || 0,
     }));
+  const matchedSections = buildStravaMatchedRouteSections(
+    route.points,
+    validMatches,
+    availableSegments,
+  );
 
   return {
     enabled: true,
@@ -1996,10 +2677,14 @@ function scoreRouteStrava(route, segments = []) {
       -matchedMeters * STRAVA_SCORE_PER_METER -
       matchedSegments.length * STRAVA_SCORE_PER_SEGMENT,
     segmentCount: availableSegments.length,
+    searchBoxCount,
     matchedCount: matchedSegments.length,
     matchedMeters,
     segments: availableSegments,
     matchedSegments,
+    matchedSections,
+    fromCache: Boolean(options.fromCache),
+    stale: Boolean(options.stale),
   };
 }
 
@@ -2018,6 +2703,7 @@ function sampleRoutePoints(points, spacingMeters) {
 
     if (point) {
       samples.push({
+        distanceMeters,
         point,
         weightMeters: Math.min(spacingMeters, totalMeters - distanceMeters),
       });
@@ -2025,6 +2711,90 @@ function sampleRoutePoints(points, spacingMeters) {
   }
 
   return samples;
+}
+
+function buildStravaMatchedRouteSections(points, matches, segments) {
+  if (!matches.length) return [];
+
+  const segmentsById = new Map(segments.map((segment) => [segment.id, segment]));
+  const sortedMatches = [...matches].sort(
+    (a, b) => a.distanceMeters - b.distanceMeters,
+  );
+  const sections = [];
+  let current = null;
+
+  sortedMatches.forEach((match) => {
+    const startDistance = Math.max(
+      0,
+      match.distanceMeters - match.weightMeters / 2,
+    );
+    const endDistance = match.distanceMeters + match.weightMeters / 2;
+    const shouldContinue =
+      current &&
+      startDistance <= current.endDistance + STRAVA_ROUTE_SAMPLE_METERS * 1.4;
+
+    if (!shouldContinue) {
+      if (current) sections.push(current);
+
+      current = {
+        startDistance,
+        endDistance,
+        segmentIds: new Set([match.segmentId]),
+      };
+      return;
+    }
+
+    current.endDistance = Math.max(current.endDistance, endDistance);
+    current.segmentIds.add(match.segmentId);
+  });
+
+  if (current) sections.push(current);
+
+  return sections
+    .map((section) => {
+      const meters = section.endDistance - section.startDistance;
+
+      if (meters < STRAVA_MIN_MATCH_SECTION_METERS) return null;
+
+      const sectionSegments = [...section.segmentIds]
+        .map((segmentId) => segmentsById.get(segmentId))
+        .filter(Boolean);
+
+      return {
+        meters,
+        points: sliceRouteByDistance(
+          points,
+          section.startDistance,
+          section.endDistance,
+        ),
+        segmentNames: sectionSegments.map((segment) => segment.name),
+      };
+    })
+    .filter((section) => section?.points?.length >= 2);
+}
+
+function sliceRouteByDistance(points, startMeters, endMeters) {
+  const sliced = [];
+  const start = pointAtRouteDistance(points, startMeters);
+  const end = pointAtRouteDistance(points, endMeters);
+
+  if (!start || !end) return sliced;
+
+  sliced.push(start);
+
+  const distances = buildCumulativeDistances(points);
+
+  points.forEach((point, index) => {
+    const distance = distances[index];
+
+    if (distance > startMeters && distance < endMeters) {
+      sliced.push(point);
+    }
+  });
+
+  sliced.push(end);
+
+  return sliced;
 }
 
 function findNearestStravaSegmentId(point, segments, maxDistanceMeters) {
@@ -2312,6 +3082,10 @@ function angleDistanceDegrees(a, b) {
   const difference = Math.abs(a - b) % 360;
 
   return difference > 180 ? 360 - difference : difference;
+}
+
+function normalizeDegrees(value) {
+  return ((value % 360) + 360) % 360;
 }
 
 function signedAngleDegrees(a, b) {
